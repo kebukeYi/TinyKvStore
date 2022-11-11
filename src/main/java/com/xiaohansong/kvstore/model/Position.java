@@ -13,6 +13,11 @@ import lombok.Data;
 public class Position {
 
     /**
+     * 稀疏索引名字
+     */
+    private String PartDataName;
+
+    /**
      * 开始
      */
     private long start;

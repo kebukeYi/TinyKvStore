@@ -10,7 +10,6 @@ public class ConvertUtil {
 
     public static final String TYPE = "type";
 
-
     public static Command jsonToCommand(JSONObject value) {
         if (value.getString(TYPE).equals(CommandTypeEnum.SET.name())) {
             return value.toJavaObject(SetCommand.class);

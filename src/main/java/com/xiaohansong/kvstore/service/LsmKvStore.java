@@ -30,8 +30,9 @@ public class LsmKvStore implements KvStore {
 
     /**
      * 内存表
+     * TreeMap 是红黑树实现
      */
-    private TreeMap<String, Command> index;
+    private TreeMap<String, Command> memoryTable;
 
     /**
      * 不可变内存表，用于持久化内存表中时暂存数据
@@ -59,7 +60,8 @@ public class LsmKvStore implements KvStore {
     private final int storeThreshold;
 
     /**
-     * 数据分区大小
+     * 数据分段大小
+     * 每一段用来 构建 稀疏索引
      */
     private final int partSize;
 
@@ -75,9 +77,10 @@ public class LsmKvStore implements KvStore {
 
     /**
      * 初始化
-     * @param dataDir 数据目录
+     *
+     * @param dataDir        数据目录
      * @param storeThreshold 持久化阈值
-     * @param partSize 数据分区大小
+     * @param partSize       数据分区大小
      */
     public LsmKvStore(String dataDir, int storeThreshold, int partSize) {
         try {
@@ -88,29 +91,29 @@ public class LsmKvStore implements KvStore {
             File dir = new File(dataDir);
             File[] files = dir.listFiles();
             ssTables = new LinkedList<>();
-            index = new TreeMap<>();
-            //目录为空无需加载ssTable
+            memoryTable = new TreeMap<>();
+            // 目录为空无需加载 ssTable
             if (files == null || files.length == 0) {
                 walFile = new File(dataDir + WAL);
                 wal = new RandomAccessFile(walFile, RW_MODE);
                 return;
             }
 
-            //从大到小加载ssTable
+            // 从大到小加载 ssTable
             TreeMap<Long, SsTable> ssTableTreeMap = new TreeMap<>(Comparator.reverseOrder());
             for (File file : files) {
                 String fileName = file.getName();
-                //从暂存的WAL中恢复数据，一般是持久化ssTable过程中异常才会留下walTmp
+                // 从暂存的 WAL 中恢复数据，一般是持久化ssTable过程中 发生异常 才会留下walTmp
                 if (file.isFile() && fileName.equals(WAL_TMP)) {
                     restoreFromWal(new RandomAccessFile(file, RW_MODE));
                 }
-                //加载ssTable
+                // 加载 ssTable
                 if (file.isFile() && fileName.endsWith(TABLE)) {
                     int dotIndex = fileName.indexOf(".");
                     Long time = Long.parseLong(fileName.substring(0, dotIndex));
                     ssTableTreeMap.put(time, SsTable.createFromFile(file.getAbsolutePath()));
                 } else if (file.isFile() && fileName.equals(WAL)) {
-                    //加载WAL
+                    // 加载 WAL
                     walFile = file;
                     wal = new RandomAccessFile(file, RW_MODE);
                     restoreFromWal(wal);
@@ -125,6 +128,7 @@ public class LsmKvStore implements KvStore {
 
     /**
      * 从暂存日志中恢复数据
+     *
      * @param wal
      */
     private void restoreFromWal(RandomAccessFile wal) {
@@ -133,15 +137,17 @@ public class LsmKvStore implements KvStore {
             long start = 0;
             wal.seek(start);
             while (start < len) {
-                //先读取数据大小
+                // 先读取数据大小
                 int valueLen = wal.readInt();
                 //根据数据大小读取数据
                 byte[] bytes = new byte[valueLen];
                 wal.read(bytes);
+                // 解析成命令
                 JSONObject value = JSON.parseObject(new String(bytes, StandardCharsets.UTF_8));
                 Command command = ConvertUtil.jsonToCommand(value);
+                // 重新在内存中执行一次命令
                 if (command != null) {
-                    index.put(command.getKey(), command);
+                    memoryTable.put(command.getKey(), command);
                 }
                 start += 4;
                 start += valueLen;
@@ -150,7 +156,6 @@ public class LsmKvStore implements KvStore {
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
-
     }
 
 
@@ -163,10 +168,11 @@ public class LsmKvStore implements KvStore {
             //先保存数据到WAL中
             wal.writeInt(commandBytes.length);
             wal.write(commandBytes);
-            index.put(key, command);
+            // 进行覆盖
+            memoryTable.put(key, command);
 
             //内存表大小超过阈值进行持久化
-            if (index.size() > storeThreshold) {
+            if (memoryTable.size() > storeThreshold) {
                 switchIndex();
                 storeToSsTable();
             }
@@ -185,16 +191,18 @@ public class LsmKvStore implements KvStore {
         try {
             indexLock.writeLock().lock();
             //切换内存表
-            immutableIndex = index;
-            index = new TreeMap<>();
+            immutableIndex = memoryTable;
+            memoryTable = new TreeMap<>();
             wal.close();
             //切换内存表后也要切换WAL
             File tmpWal = new File(dataDir + WAL_TMP);
+            // 不能存在这个文件
             if (tmpWal.exists()) {
                 if (!tmpWal.delete()) {
                     throw new RuntimeException("删除文件失败: walTmp");
                 }
             }
+            // wal -> tmpWal
             if (!walFile.renameTo(tmpWal)) {
                 throw new RuntimeException("重命名文件失败: walTmp");
             }
@@ -212,8 +220,8 @@ public class LsmKvStore implements KvStore {
      */
     private void storeToSsTable() {
         try {
-            //ssTable按照时间命名，这样可以保证名称递增
-            SsTable ssTable = SsTable.createFromIndex(dataDir + System.currentTimeMillis() + TABLE, partSize, immutableIndex);
+            // ssTable 按照时间命名，这样可以保证名称递增，每次内存表中的数据达到阈值，就新建SSTable文件
+            SsTable ssTable = SsTable.createFromMemoryTable(dataDir + System.currentTimeMillis() + TABLE, partSize, immutableIndex);
             ssTables.addFirst(ssTable);
             //持久化完成删除暂存的内存表和WAL_TMP
             immutableIndex = null;
@@ -233,8 +241,8 @@ public class LsmKvStore implements KvStore {
     public String get(String key) {
         try {
             indexLock.readLock().lock();
-            //先从索引中取
-            Command command = index.get(key);
+            // 先从内存中取
+            Command command = memoryTable.get(key);
             //再尝试从不可变索引中取，此时可能处于持久化sstable的过程中
             if (command == null && immutableIndex != null) {
                 command = immutableIndex.get(key);
@@ -244,6 +252,12 @@ public class LsmKvStore implements KvStore {
                 for (SsTable ssTable : ssTables) {
                     command = ssTable.query(key);
                     if (command != null) {
+                        // 从磁盘中查出来的已经删除了的数据
+                        if (command instanceof RmCommand) {
+                            //todo 这里是否可以 在新的表中重新设置一下 删除后的key
+                            memoryTable.put(key, new RmCommand(key));
+                            return null;
+                        }
                         break;
                     }
                 }
@@ -271,10 +285,13 @@ public class LsmKvStore implements KvStore {
             indexLock.writeLock().lock();
             RmCommand rmCommand = new RmCommand(key);
             byte[] commandBytes = JSONObject.toJSONBytes(rmCommand);
+            // 写 WAL 日志
             wal.writeInt(commandBytes.length);
             wal.write(commandBytes);
-            index.put(key, rmCommand);
-            if (index.size() > storeThreshold) {
+
+            memoryTable.put(key, rmCommand);
+
+            if (memoryTable.size() > storeThreshold) {
                 switchIndex();
                 storeToSsTable();
             }

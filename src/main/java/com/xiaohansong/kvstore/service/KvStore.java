@@ -9,6 +9,7 @@ public interface KvStore extends Closeable {
 
     /**
      * 保存数据
+     *
      * @param key
      * @param value
      */
@@ -16,6 +17,7 @@ public interface KvStore extends Closeable {
 
     /**
      * 查询数据
+     *
      * @param key
      * @return
      */
@@ -23,6 +25,7 @@ public interface KvStore extends Closeable {
 
     /**
      * 删除数据
+     *
      * @param key
      */
     void rm(String key);

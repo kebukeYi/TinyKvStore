@@ -6,6 +6,7 @@ import java.io.RandomAccessFile;
 
 /**
  * ssTable索引信息
+ * 这里序列化的是纯字节，没有进行编码序列化，是因为编码序列化的话，就没有固定长度了
  */
 @Data
 public class TableMetaInfo {
@@ -42,10 +43,12 @@ public class TableMetaInfo {
 
     /**
      * 把数据写入到文件中
+     *
      * @param file
      */
     public void writeToFile(RandomAccessFile file) {
         try {
+            // 固定 64 字节 放在尾部，一般都是在首部
             file.writeLong(partSize);
             file.writeLong(dataStart);
             file.writeLong(dataLen);
@@ -59,6 +62,7 @@ public class TableMetaInfo {
 
     /**
      * 从文件中读取元信息，按照写入的顺序倒着读取出来
+     *
      * @param file
      * @return
      */
